@@ -1,0 +1,49 @@
+name: FunPay bot
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # every hour; a new run waits in the queue while the previous one works
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Test mode (do not send messages)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: funpay-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
+          restore-keys: state-
+
+      - name: Run bot
+        env:
+          GOLDEN_KEY: ${{ secrets.GOLDEN_KEY }}
+          MESSAGE: ${{ vars.MESSAGE }}
+          INTERVAL_MINUTES: ${{ vars.INTERVAL_MINUTES }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          RUN_MINUTES: "340"
+        run: node bot.mjs
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}-${{ github.run_attempt }}
