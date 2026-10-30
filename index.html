@@ -115,6 +115,18 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
   </section>
 
   <section class="card">
+    <h2>Автоответ в личных сообщениях</h2>
+    <div class="msg" id="ar-msg">—</div>
+    <div class="meta" id="ar-cfg">—</div>
+    <div class="tablebox" style="margin-top:12px">
+      <table>
+        <thead><tr><th>Кому ответил</th><th>Когда</th></tr></thead>
+        <tbody id="ar-rows"><tr><td colspan="2" class="empty">Пока никому. Ответ уйдёт, как только вам напишут в ЛС.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
     <h2>Отправлено по дням</h2>
     <div class="bars" id="bars"></div>
   </section>
@@ -231,6 +243,16 @@ function render() {
   $("msg").textContent = c.message || "—";
   $("cfg").textContent = "Интервал " + (c.intervalMinutes ?? "—") + " мин · пропуск, если ваше сообщение среди последних " + (c.topN ?? 5) + " · " + (c.enabled === false ? "пауза" : "включён");
   if (data.runUrl) $("a-log").href = data.runUrl;
+
+  const ar = c.autoReply || {};
+  const pm = st.pm || {};
+  $("ar-msg").textContent = ar.message || "Текст не задан";
+  $("ar-cfg").textContent = (ar.enabled ? "Включён" : "Выключен") + " · сегодня ответов: " + ((pm.days || {})[today] ?? 0) +
+    " · одному человеку не чаще раза в " + (ar.cooldownHours ?? 24) + " ч · {name} заменяется именем собеседника";
+  const reps = pm.replies || [];
+  $("ar-rows").innerHTML = reps.length ? reps.map((r) =>
+    '<tr><td><a href="https://funpay.com/chat/?node=' + esc(r.id) + '" target="_blank" rel="noopener">' + esc(r.name) + '</a></td><td class="t">' + ago(r.at) + "</td></tr>").join("")
+    : '<tr><td colspan="2" class="empty">Пока никому. Ответ уйдёт, как только вам напишут в ЛС.</td></tr>';
 
   const keys = [];
   for (let i = 6; i >= 0; i--) keys.push(new Date(Date.now() - i * 86400000).toISOString().slice(0, 10));
