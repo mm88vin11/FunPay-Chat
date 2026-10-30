@@ -38,7 +38,7 @@ jobs:
         run: node bot.mjs
 
       - name: Start the next run
-        if: success()
+        if: success() && hashFiles('.restart') != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run bot.yml --ref main

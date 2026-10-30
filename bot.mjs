@@ -276,7 +276,8 @@ async function main() {
     phaseText = e.message;
     log("ОШИБКА:", e.message);
     await publishStatus(true);
-    process.exit(1);
+    // a missing/invalid key is shown on the panel; exit cleanly so GitHub does not mail a failure every half hour
+    process.exit(e.fatal ? 0 : 1);
   }
   let lastLogin = Date.now();
   let allGames = parseGames(html);
@@ -354,6 +355,7 @@ async function main() {
   phaseText = "Плановый перезапуск, через минуту продолжу";
   log("Плановый перезапуск");
   await publishStatus(true);
+  writeFileSync(".restart", ""); // tells the workflow to start the next run right away
 }
 
 for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, async () => { await publishStatus(true); process.exit(0); });
