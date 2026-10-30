@@ -1,9 +1,10 @@
 {
-  "message": "Куплю! Пишите в личные сообщения 🙂",
-  "intervalMinutes": 30,
+  "enabled": true,
+  "message": "💰 Куплю всё по {game}: аккаунты, валюту, предметы, услуги. Предлагайте в личные сообщения — отвечаю быстро! 🤝",
+  "intervalMinutes": 10,
   "topN": 5,
   "requestDelaySeconds": 1,
-  "sendDelaySeconds": 5,
+  "sendDelaySeconds": 3,
   "includeGameIds": [],
   "excludeGameIds": [],
   "messageOverrides": {}

@@ -2,7 +2,7 @@ name: FunPay bot
 
 on:
   schedule:
-    - cron: "0 * * * *"   # every hour; a new run waits in the queue while the previous one works
+    - cron: "7,37 * * * *"   # backup start; normally each run starts the next one itself
   workflow_dispatch:
     inputs:
       dry_run:
@@ -14,36 +14,31 @@ concurrency:
   group: funpay-bot
   cancel-in-progress: false
 
+permissions:
+  contents: write
+  actions: write
+
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 350
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
-
-      - name: Restore state
-        uses: actions/cache/restore@v4
-        with:
-          path: state.json
-          key: state-${{ github.run_id }}
-          restore-keys: state-
 
       - name: Run bot
         env:
           GOLDEN_KEY: ${{ secrets.GOLDEN_KEY }}
-          MESSAGE: ${{ vars.MESSAGE }}
-          INTERVAL_MINUTES: ${{ vars.INTERVAL_MINUTES }}
-          DRY_RUN: ${{ inputs.dry_run }}
-          RUN_MINUTES: "340"
+          GITHUB_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run && 'true' || '' }}
+          RUN_MINUTES: "330"
         run: node bot.mjs
 
-      - name: Save state
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: state.json
-          key: state-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Start the next run
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run bot.yml --ref main
