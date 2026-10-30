@@ -7,5 +7,11 @@
   "sendDelaySeconds": 3,
   "includeGameIds": [],
   "excludeGameIds": [],
-  "messageOverrides": {}
+  "messageOverrides": {},
+  "autoReply": {
+    "enabled": true,
+    "message": "Здравствуйте, {name}! 👋 Спасибо, что написали. Пришлите, пожалуйста, что продаёте и за сколько — отвечу в ближайшее время.",
+    "cooldownHours": 24,
+    "pollSeconds": 20
+  }
 }

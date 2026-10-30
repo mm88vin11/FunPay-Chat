@@ -44,6 +44,12 @@ const cfg = () => {
     exclude: new Set((config.excludeGameIds ?? []).map(String)),
     overrides: Object.fromEntries(Object.entries(config.messageOverrides ?? {}).map(([k, v]) => [String(k), v])),
     dryRun: ["1", "true", "yes"].includes(String(dry).toLowerCase()),
+    autoReply: {
+      enabled: config.autoReply?.enabled !== false && !!String(config.autoReply?.message ?? "").trim(),
+      message: String(config.autoReply?.message ?? ""),
+      cooldownMs: Number(config.autoReply?.cooldownHours ?? 24) * 3600_000,
+      pollMs: Math.max(10, Number(config.autoReply?.pollSeconds ?? 20)) * 1000,
+    },
   };
 };
 
@@ -77,7 +83,8 @@ async function refreshConfig() {
 // state.due[id]  - when to check the chat next
 // state.chats[id] - what the panel shows
 // state.days[YYYY-MM-DD] - messages sent per day
-let state = { due: {}, chats: {}, days: {} };
+// state.pm - private messages: last seen message per dialog, last auto-reply time, recent replies
+let state = { due: {}, chats: {}, days: {}, pm: null };
 if (existsSync(STATE_FILE)) {
   try {
     state = { ...state, ...JSON.parse(readFileSync(STATE_FILE, "utf8")) };
@@ -120,7 +127,10 @@ async function publishStatus(force = false) {
     phaseText,
     user: { id: myId, name: myName },
     nextPassAt: nextPassAt ? new Date(nextPassAt).toISOString() : null,
-    config: { enabled: c.enabled, message: c.message, intervalMinutes: c.intervalMin, topN: c.topN, dryRun: c.dryRun },
+    config: {
+      enabled: c.enabled, message: c.message, intervalMinutes: c.intervalMin, topN: c.topN, dryRun: c.dryRun,
+      autoReply: { enabled: c.autoReply.enabled, message: c.autoReply.message, cooldownHours: c.autoReply.cooldownMs / 3600_000 },
+    },
     log: logLines.slice(-60),
     state,
   };
@@ -216,8 +226,9 @@ async function lastMessages(gameId) {
   return data.chat.messages ?? [];
 }
 
-async function sendMessage(gameId, text) {
-  const request = { action: "chat_message", data: { node: `game-${gameId}`, last_message: -1, content: text } };
+async function sendMessage(id, text, isDialog = false) {
+  const node = isDialog ? Number(id) : `game-${id}`;
+  const request = { action: "chat_message", data: { node, last_message: -1, content: text } };
   const body = new URLSearchParams({ objects: "[]", request: JSON.stringify(request), csrf_token: csrf }).toString();
   const res = await http("/runner/", { method: "POST", body, ajax: true });
   const raw = await res.text();
@@ -262,6 +273,94 @@ async function processGame(id, name) {
   return "sent";
 }
 
+// ---------- auto-reply to private messages ----------
+function parseDialogs(html) {
+  const dialogs = [];
+  for (const m of html.matchAll(/<a\s([^>]*class="contact-item[^"]*"[^>]*)>([\s\S]*?)<\/a>/g)) {
+    const attr = (n) => m[1].match(new RegExp(`${n}="([^"]*)"`))?.[1];
+    const id = attr("data-id");
+    const lastId = Number(attr("data-node-msg") || 0);
+    if (!id || !lastId) continue;
+    const name = decodeHtml(m[2].match(/class="media-user-name"[^>]*>([^<]*)</)?.[1] ?? "").trim();
+    dialogs.push({ id, lastId, name: name || `чат ${id}` });
+  }
+  return dialogs;
+}
+
+async function chatHistory(node) {
+  const res = await http(`/chat/history?node=${node}&last_message=999999999999`, { ajax: true });
+  return (await res.json())?.chat?.messages ?? [];
+}
+
+async function pmCheck() {
+  const ar = cfg().autoReply;
+  const pm = state.pm;
+  if (!myId) return;
+  const dialogs = parseDialogs(await (await http("/chat/")).text());
+  if (!pm.ready) {
+    if (!dialogs.length) {
+      if (!pm.warned) log("Автоответ: пока нет диалогов, жду первого сообщения");
+      pm.warned = true;
+      pm.ready = true;
+      return;
+    }
+    // first run ever: remember current dialogs, answer only messages that arrive from now on
+    for (const d of dialogs) pm.seen[d.id] = d.lastId;
+    pm.ready = true;
+    log(`Автоответ: отслеживаю ${dialogs.length} диалогов`);
+    return;
+  }
+  for (const d of dialogs) {
+    const seen = pm.seen[d.id] ?? 0;
+    if (d.lastId <= seen) continue;
+    pm.seen[d.id] = d.lastId;
+    const msgs = await chatHistory(d.id);
+    const fresh = msgs.filter((m) => Number(m.id) > seen);
+    const last = msgs[msgs.length - 1];
+    // author 0 = FunPay system notices; skip if the dialog already ends with my own message
+    const incoming = fresh.some((m) => Number(m.author) && Number(m.author) !== myId);
+    if (!incoming || !last || Number(last.author) === myId) continue;
+    if (Date.now() - (pm.last[d.id] ?? 0) < ar.cooldownMs) continue;
+    const text = ar.message.replaceAll("{name}", d.name);
+    if (cfg().dryRun) {
+      log(`~ ЛС ${d.name}: ответил бы (тестовый режим)`);
+      continue;
+    }
+    try {
+      await sendMessage(d.id, text, true);
+    } catch (e) {
+      pm.seen[d.id] = seen; // retry on the next check
+      throw new Error(`${d.name}: ${e.message}`);
+    }
+    pm.last[d.id] = Date.now();
+    pm.replies.unshift({ name: d.name, id: d.id, at: Date.now() });
+    pm.replies = pm.replies.slice(0, 30);
+    pm.days[today()] = (pm.days[today()] ?? 0) + 1;
+    log(`> ЛС ${d.name}: отправлен автоответ`);
+    await sleep(2000);
+  }
+}
+
+async function pmLoop() {
+  state.pm ??= {};
+  state.pm = { seen: {}, last: {}, replies: [], days: {}, ready: false, ...state.pm };
+  state.pm.days = Object.fromEntries(Object.entries(state.pm.days).sort().slice(-14));
+  let errors = 0;
+  while (timeLeft() > 0) {
+    const ar = cfg().autoReply;
+    if (ar.enabled) {
+      try {
+        await pmCheck();
+        errors = 0;
+      } catch (e) {
+        errors++;
+        log(`! автоответ: ${e.message}`);
+      }
+    }
+    await sleep(Math.min(ar.pollMs * (1 + Math.min(errors, 5)), Math.max(1000, timeLeft())));
+  }
+}
+
 async function main() {
   await loadRemoteState();
   // keep only the last 14 days of counters
@@ -280,6 +379,7 @@ async function main() {
     process.exit(e.fatal ? 0 : 1);
   }
   let lastLogin = Date.now();
+  pmLoop();
   let allGames = parseGames(html);
   if (!allGames.size) throw new Error("На главной FunPay не найдено ни одной игры");
   let errorsInRow = 0;
@@ -356,6 +456,7 @@ async function main() {
   log("Плановый перезапуск");
   await publishStatus(true);
   writeFileSync(".restart", ""); // tells the workflow to start the next run right away
+  process.exit(0);
 }
 
 for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, async () => { await publishStatus(true); process.exit(0); });
