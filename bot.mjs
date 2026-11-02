@@ -153,6 +153,34 @@ async function publishStatus(force = false) {
   }
 }
 
+// ---------- GitHub issue as an e-mail alert when the FunPay key stops working ----------
+const ALERT_TITLE = "Бот FunPay остановлен: нужен новый ключ";
+async function keyAlert(problem) {
+  if (!GH_REPO || !GH_TOKEN) return;
+  try {
+    const open = (await (await gh(`/issues?state=open&per_page=50`)).json()).filter((i) => i.title === ALERT_TITLE && !i.pull_request);
+    if (problem && !open.length) {
+      await gh(`/issues`, {
+        method: "POST",
+        body: JSON.stringify({
+          title: ALERT_TITLE,
+          body: `${problem}\n\n1. На funpay.com: F12 → Application → Cookies → скопируйте \`golden_key\`.\n` +
+            `2. Откройте https://github.com/${GH_REPO}/settings/secrets/actions/GOLDEN_KEY и вставьте новый ключ.\n\n` +
+            `Бот подхватит его сам в течение 30 минут и закроет это сообщение.`,
+        }),
+      });
+      log("Создано уведомление о ключе (придёт на почту GitHub)");
+    }
+    if (!problem) {
+      for (const i of open) {
+        await gh(`/issues/${i.number}`, { method: "PATCH", body: JSON.stringify({ state: "closed", state_reason: "completed" }) });
+      }
+    }
+  } catch (e) {
+    console.log(`! уведомление не обработано: ${e.message}`);
+  }
+}
+
 // ---------- HTTP to FunPay with a tiny cookie jar ----------
 const cookies = new Map([["cookie_prefs", "1"]]);
 if (GOLDEN_KEY) cookies.set("golden_key", GOLDEN_KEY);
@@ -374,11 +402,13 @@ async function main() {
     phase = e.fatal ? "nokey" : "error";
     phaseText = e.message;
     log("ОШИБКА:", e.message);
+    if (e.fatal) await keyAlert(e.message);
     await publishStatus(true);
     // a missing/invalid key is shown on the panel; exit cleanly so GitHub does not mail a failure every half hour
     process.exit(e.fatal ? 0 : 1);
   }
   let lastLogin = Date.now();
+  await keyAlert(null);
   pmLoop();
   let allGames = parseGames(html);
   if (!allGames.size) throw new Error("На главной FunPay не найдено ни одной игры");
