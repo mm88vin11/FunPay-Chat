@@ -270,6 +270,35 @@ async function sendMessage(id, text, isDialog = false) {
   if (err) throw new Error(typeof err === "string" ? err : JSON.stringify(err));
 }
 
+// ---------- one shared send queue: FunPay limits how often you may message different users ----------
+// Private replies go first: while any are waiting, game-chat posts hold back.
+let pmPending = 0;
+let lastSendAt = 0;
+let blockedUntil = 0;
+let strikes = 0;
+const isRateLimit = (e) => /слишком часто|too often|too many/i.test(e.message);
+
+async function gatedSend(id, text, isDialog) {
+  for (;;) {
+    const gap = cfg().sendDelay;
+    const readyAt = Math.max(blockedUntil, lastSendAt + gap);
+    if (Date.now() >= readyAt && (isDialog || pmPending === 0)) break;
+    await sleep(Math.max(250, Math.min(readyAt - Date.now(), 1000)));
+  }
+  lastSendAt = Date.now();
+  try {
+    await sendMessage(id, text, isDialog);
+    strikes = Math.max(0, strikes - 1);
+  } catch (e) {
+    if (isRateLimit(e)) {
+      strikes = Math.min(strikes + 1, 4);
+      blockedUntil = Date.now() + 15_000 * 2 ** (strikes - 1); // 15s, 30s, 60s, 120s
+      e.rateLimited = true;
+    }
+    throw e;
+  }
+}
+
 async function processGame(id, name) {
   const c = cfg();
   const chat = (state.chats[id] ??= { name });
@@ -292,7 +321,7 @@ async function processGame(id, name) {
     log(`~ ${name}: отправил бы (тестовый режим)`);
     return "sent";
   }
-  await sendMessage(id, text);
+  await gatedSend(id, text, false);
   chat.result = "sent";
   chat.sentAt = Date.now();
   chat.error = undefined;
@@ -338,34 +367,57 @@ async function pmCheck() {
     log(`Автоответ: отслеживаю ${dialogs.length} диалогов`);
     return;
   }
+  const todo = [];
   for (const d of dialogs) {
     const seen = pm.seen[d.id] ?? 0;
     if (d.lastId <= seen) continue;
+    todo.push([d, seen]);
+  }
+  pmPending = todo.length; // hold game-chat posts until these are answered
+  try {
+    for (const [d, seen] of todo) {
+      try {
+        await pmHandle(d, seen, ar, pm);
+      } catch (e) {
+        pm.seen[d.id] = seen; // retry on the next check
+        log(`! автоответ ${d.name}: ${e.message}`);
+      }
+      pmPending = Math.max(0, pmPending - 1);
+    }
+  } finally {
+    pmPending = 0;
+  }
+}
+
+async function pmHandle(d, seen, ar, pm) {
+  {
     pm.seen[d.id] = d.lastId;
     const msgs = await chatHistory(d.id);
     const fresh = msgs.filter((m) => Number(m.id) > seen);
     const last = msgs[msgs.length - 1];
     // author 0 = FunPay system notices; skip if the dialog already ends with my own message
     const incoming = fresh.some((m) => Number(m.author) && Number(m.author) !== myId);
-    if (!incoming || !last || Number(last.author) === myId) continue;
-    if (Date.now() - (pm.last[d.id] ?? 0) < ar.cooldownMs) continue;
+    if (!incoming || !last || Number(last.author) === myId) return;
+    if (Date.now() - (pm.last[d.id] ?? 0) < ar.cooldownMs) return;
     const text = ar.message.replaceAll("{name}", d.name);
     if (cfg().dryRun) {
       log(`~ ЛС ${d.name}: ответил бы (тестовый режим)`);
-      continue;
+      return;
     }
-    try {
-      await sendMessage(d.id, text, true);
-    } catch (e) {
-      pm.seen[d.id] = seen; // retry on the next check
-      throw new Error(`${d.name}: ${e.message}`);
+    // on a flood limit wait for the queue to reopen and try again, up to 6 times
+    for (let attempt = 1; ; attempt++) {
+      try {
+        await gatedSend(d.id, text, true);
+        break;
+      } catch (e) {
+        if (!e.rateLimited || attempt >= 6) throw e;
+      }
     }
     pm.last[d.id] = Date.now();
     pm.replies.unshift({ name: d.name, id: d.id, at: Date.now() });
     pm.replies = pm.replies.slice(0, 30);
     pm.days[today()] = (pm.days[today()] ?? 0) + 1;
     log(`> ЛС ${d.name}: отправлен автоответ`);
-    await sleep(2000);
   }
 }
 
@@ -459,6 +511,10 @@ async function main() {
         await publishStatus();
         await sleep(r === "sent" ? cfg().sendDelay : cfg().requestDelay);
       } catch (e) {
+        if (e.rateLimited) {
+          state.due[id] = Date.now(); // the shared queue already waits; try this chat again next pass
+          continue;
+        }
         stats.error++;
         errorsInRow++;
         log(`! ${name}: ${e.message}`);
