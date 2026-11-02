@@ -427,6 +427,7 @@ async function pmLoop() {
   state.pm.days = Object.fromEntries(Object.entries(state.pm.days).sort().slice(-14));
   let errors = 0;
   while (timeLeft() > 0) {
+    await refreshConfig();
     const ar = cfg().autoReply;
     if (ar.enabled) {
       try {
@@ -492,6 +493,7 @@ async function main() {
     const stats = { sent: 0, skip: 0, missing: 0, error: 0 };
 
     for (const [id, name] of due) {
+      await refreshConfig(); // throttled to once a minute
       if (timeLeft() <= 0 || !cfg().enabled) break;
       if (Date.now() - lastLogin > 30 * 60_000) {
         try {
